@@ -7,33 +7,41 @@ import json
 from pathlib import Path
 import tempfile
 from balancing_robot.analysis.io import save_run, load_run, load_metadata
-from balancing_robot.analysis.plots import plot_tilt_vs_time, plot_torque_vs_time
+from balancing_robot.analysis.plots import (
+    plot_tilt_vs_time,
+    plot_torque_vs_time,
+    plot_position_drift,
+    plot_tilt_sweep_map,
+)
 from balancing_robot.simulation import CSV_COLUMNS
 
 
-def make_sample_rows(n=100):
+def make_sample_rows(n=100, controller="pid", status="BALANCING", settle=True):
     rows = []
     for i in range(n):
-        t = i * 0.01
+        t = i * 0.05
+        # Exponential decay that settles within settling band (0.5 deg ~ 0.0087 rad)
+        decay = math.exp(-1.5 * t) if settle else 1.0
+        tilt_val = 0.05 * decay
         rows.append({
             "experiment_id": "E_test",
-            "controller": "pid",
-            "run_id": "test_run",
+            "controller": controller,
+            "run_id": f"test_run_{controller}",
             "seed": 42,
             "time_s": t,
-            "tilt_rad": 0.05 * math.exp(-0.5 * t),
-            "tilt_deg": math.degrees(0.05 * math.exp(-0.5 * t)),
-            "tilt_rate_rad_s": -0.025 * math.exp(-0.5 * t),
-            "x_m": 0.0,
-            "x_vel_m_s": 0.0,
-            "left_wheel_vel_rad_s": 0.0,
-            "right_wheel_vel_rad_s": 0.0,
+            "tilt_rad": tilt_val,
+            "tilt_deg": math.degrees(tilt_val),
+            "tilt_rate_rad_s": -0.05 * decay,
+            "x_m": 0.02 * t,
+            "x_vel_m_s": 0.02,
+            "left_wheel_vel_rad_s": 0.5,
+            "right_wheel_vel_rad_s": 0.5,
             "left_torque_cmd_Nm": 1.0,
             "right_torque_cmd_Nm": 1.0,
             "left_torque_applied_Nm": 0.9,
             "right_torque_applied_Nm": 0.9,
             "disturbance_force_N": 0.0,
-            "status": "BALANCING",
+            "status": status,
         })
     return rows
 
@@ -75,6 +83,30 @@ def test_plot_tilt_vs_time():
         assert out.stat().st_size > 0
 
 
+def test_plot_tilt_vs_time_multi_controller_with_annotations():
+    """Verify tilt plot with both PID and LQR, testing settling annotations and tolerance band."""
+    pid_rows = make_sample_rows(n=100, controller="pid", settle=True)
+    lqr_rows = make_sample_rows(n=100, controller="lqr", settle=True)
+    dfs = {"PID": pd.DataFrame(pid_rows), "LQR": pd.DataFrame(lqr_rows)}
+    with tempfile.TemporaryDirectory() as tmpdir:
+        out = Path(tmpdir) / "comparison_tilt.png"
+        plot_tilt_vs_time(dfs, str(out), title="Comparison")
+        assert out.exists()
+        assert out.stat().st_size > 0
+
+
+def test_plot_tilt_vs_time_unsettled_and_fallen_runs():
+    """Verify plot handles runs that fell or never settled without raising errors."""
+    unsettled_rows = make_sample_rows(n=100, controller="pid", settle=False)
+    fallen_rows = make_sample_rows(n=20, controller="none", status="FELL", settle=False)
+    dfs = {"Unsettled": pd.DataFrame(unsettled_rows), "Fallen": pd.DataFrame(fallen_rows)}
+    with tempfile.TemporaryDirectory() as tmpdir:
+        out = Path(tmpdir) / "unsettled.png"
+        plot_tilt_vs_time(dfs, str(out))
+        assert out.exists()
+        assert out.stat().st_size > 0
+
+
 def test_plot_torque_vs_time():
     rows = make_sample_rows()
     df = pd.DataFrame(rows)
@@ -83,3 +115,25 @@ def test_plot_torque_vs_time():
         plot_torque_vs_time({"PID": df}, str(out))
         assert out.exists()
         assert out.stat().st_size > 0
+
+
+def test_plot_position_drift_and_sweep_map():
+    """Verify position drift and tilt sweep map plotting functions."""
+    rows = make_sample_rows()
+    df = pd.DataFrame(rows)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        drift_out = Path(tmpdir) / "drift.png"
+        plot_position_drift({"PID": df}, str(drift_out))
+        assert drift_out.exists()
+        assert drift_out.stat().st_size > 0
+
+        map_out = Path(tmpdir) / "sweep_map.png"
+        results = [
+            {"controller": "pid", "initial_tilt_deg": 1.0, "success": True},
+            {"controller": "pid", "initial_tilt_deg": 5.0, "success": True},
+            {"controller": "lqr", "initial_tilt_deg": 1.0, "success": True},
+            {"controller": "lqr", "initial_tilt_deg": 15.0, "success": True},
+        ]
+        plot_tilt_sweep_map(results, str(map_out))
+        assert map_out.exists()
+        assert map_out.stat().st_size > 0
